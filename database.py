@@ -1,35 +1,46 @@
-import sqlite3
+import os
+import psycopg2
 import hashlib
 from datetime import datetime
+import streamlit as st
 
-DB_NAME = "emissions_history.db"
+
+def get_connection():
+    """Connects to Neon PostgreSQL using Streamlit Secrets or Environment Variables."""
+    if "postgres" in st.secrets:
+        db_url = st.secrets["postgres"]["url"]
+    else:
+        db_url = os.environ.get("DATABASE_URL")
+
+    if not db_url:
+        raise ValueError("Database URL missing! Add it to .streamlit/secrets.toml")
+
+    return psycopg2.connect(db_url)
 
 
 def hash_password(password):
-    """Hashes passwords using SHA-256 for secure storage."""
+    """Hashes passwords using SHA-256."""
     return hashlib.sha256(password.encode()).hexdigest()
 
 
 def init_db():
-    """Initializes SQLite database tables for users and calculation logs."""
-    conn = sqlite3.connect(DB_NAME)
+    """Initializes PostgreSQL tables if they don't exist."""
+    conn = get_connection()
     cursor = conn.cursor()
-    
-    # Users Table
+
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT UNIQUE NOT NULL,
-            password TEXT NOT NULL
-        )
+            id SERIAL PRIMARY KEY,
+            username VARCHAR(100) UNIQUE NOT NULL,
+            password VARCHAR(255) NOT NULL
+        );
     ''')
-    
-    # History Table with Username column
+
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT NOT NULL,
-            timestamp TEXT NOT NULL,
+            id SERIAL PRIMARY KEY,
+            username VARCHAR(100) NOT NULL,
+            timestamp VARCHAR(50) NOT NULL,
             daily_kg REAL,
             monthly_kg REAL,
             yearly_kg REAL,
@@ -38,52 +49,63 @@ def init_db():
             food_kg REAL,
             waste_kg REAL,
             water_kg REAL,
-            FOREIGN KEY (username) REFERENCES users (username)
-        )
+            FOREIGN KEY (username) REFERENCES users (username) ON DELETE CASCADE
+        );
     ''')
+
     conn.commit()
+    cursor.close()
     conn.close()
 
 
 def register_user(username, password):
-    """Registers a new user account with hashed password."""
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
+    """Registers a new user account."""
     try:
+        conn = get_connection()
+        cursor = conn.cursor()
         hashed_pwd = hash_password(password)
-        cursor.execute('INSERT INTO users (username, password) VALUES (?, ?)', (username, hashed_pwd))
+        cursor.execute(
+            'INSERT INTO users (username, password) VALUES (%s, %s)',
+            (username, hashed_pwd)
+        )
         conn.commit()
+        cursor.close()
         conn.close()
         return True, "Account created successfully! Please log in."
-    except sqlite3.IntegrityError:
-        conn.close()
-        return False, "Username already exists. Please choose a different one."
+    except psycopg2.IntegrityError:
+        return False, "Username already exists. Please choose another."
+    except Exception as e:
+        return False, f"Database error: {str(e)}"
 
 
 def verify_user(username, password):
-    """Verifies user login credentials."""
-    conn = sqlite3.connect(DB_NAME)
+    """Verifies login credentials."""
+    conn = get_connection()
     cursor = conn.cursor()
     hashed_pwd = hash_password(password)
-    cursor.execute('SELECT * FROM users WHERE username = ? AND password = ?', (username, hashed_pwd))
+    cursor.execute(
+        'SELECT id FROM users WHERE username = %s AND password = %s',
+        (username, hashed_pwd)
+    )
     user = cursor.fetchone()
+    cursor.close()
     conn.close()
     return user is not None
 
 
 def save_record(username, results):
-    """Saves a calculation entry linked to a specific username."""
-    conn = sqlite3.connect(DB_NAME)
+    """Saves footprint record linked to username."""
+    conn = get_connection()
     cursor = conn.cursor()
-    
+
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     breakdown = results["breakdown"]
-    
+
     cursor.execute('''
         INSERT INTO history (
-            username, timestamp, daily_kg, monthly_kg, yearly_kg, 
+            username, timestamp, daily_kg, monthly_kg, yearly_kg,
             transport_kg, electricity_kg, food_kg, waste_kg, water_kg
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     ''', (
         username,
         now,
@@ -96,22 +118,24 @@ def save_record(username, results):
         breakdown["Household Waste"],
         breakdown["Water Usage"]
     ))
-    
+
     conn.commit()
+    cursor.close()
     conn.close()
 
 
 def get_history(username):
-    """Retrieves history entries specific to the logged-in user."""
-    conn = sqlite3.connect(DB_NAME)
+    """Retrieves user history logs."""
+    conn = get_connection()
     cursor = conn.cursor()
     cursor.execute('''
-        SELECT timestamp, daily_kg, monthly_kg, yearly_kg, 
-               transport_kg, electricity_kg, food_kg, waste_kg, water_kg 
-        FROM history 
-        WHERE username = ?
+        SELECT timestamp, daily_kg, monthly_kg, yearly_kg,
+               transport_kg, electricity_kg, food_kg, waste_kg, water_kg
+        FROM history
+        WHERE username = %s
         ORDER BY id DESC
     ''', (username,))
     rows = cursor.fetchall()
+    cursor.close()
     conn.close()
     return rows
